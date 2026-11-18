@@ -8,12 +8,14 @@ import javafx.beans.property.SimpleLongProperty;
 import javafx.beans.property.SimpleStringProperty;
 import javafx.collections.FXCollections;
 import javafx.geometry.Insets;
+import javafx.geometry.Pos;
 import javafx.scene.Scene;
 import javafx.scene.control.Alert;
 import javafx.scene.control.Button;
 import javafx.scene.control.CheckBox;
 import javafx.scene.control.ComboBox;
 import javafx.scene.control.Label;
+import javafx.scene.control.ProgressBar;
 import javafx.scene.control.Tab;
 import javafx.scene.control.TabPane;
 import javafx.scene.control.TableColumn;
@@ -26,10 +28,7 @@ import javafx.scene.layout.VBox;
 import javafx.stage.Stage;
 
 import java.io.IOException;
-import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
 import java.nio.file.Path;
-import java.util.List;
 import java.util.logging.Logger;
 
 public class MainApp extends Application {
@@ -52,7 +51,7 @@ public class MainApp extends Application {
         );
         tabs.getTabs().forEach(t -> t.setClosable(false));
 
-        Scene scene = new Scene(tabs, 980, 620);
+        Scene scene = new Scene(tabs, 980, 640);
         stage.setTitle("Бронювання спортивних об'єктів (Клієнт)");
         stage.setScene(scene);
         stage.show();
@@ -291,14 +290,56 @@ public class MainApp extends Application {
         Button btnRefresh = new Button("Оновити");
         btnRefresh.setOnAction(e -> safe(this::refreshSlots));
 
-        Button btnTestCsv = new Button("Прочитати тестовий рядок CSV");
-        btnTestCsv.setOnAction(e -> safe(() -> {
-            TimeSlot csvSlot = readTestTimeSlot();
-            api.addTimeSlot(csvSlot);
-            refreshSlots();
-        }));
+        ProgressBar progress = new ProgressBar(0);
+        progress.setPrefWidth(220);
+        Label status = new Label("CSV не імпортовано");
+        Button btnImportCsv = new Button("Імпортувати CSV");
 
-        HBox buttons = new HBox(10, btnAdd, btnUpdate, btnDelete, btnRefresh, btnTestCsv);
+        btnImportCsv.setOnAction(e -> {
+            ImportTimeSlotsTask task = new ImportTimeSlotsTask(
+                    Path.of("sample-data", "time_slots.csv"), api);
+
+            progress.progressProperty().unbind();
+            status.textProperty().unbind();
+            progress.progressProperty().bind(task.progressProperty());
+            status.textProperty().bind(task.messageProperty());
+            btnImportCsv.setDisable(true);
+
+            task.setOnSucceeded(ev -> {
+                progress.progressProperty().unbind();
+                status.textProperty().unbind();
+                progress.setProgress(1.0);
+                status.setText("Готово. Імпортовано: " + task.getValue());
+                btnImportCsv.setDisable(false);
+                safe(this::refreshSlots);
+            });
+
+            task.setOnFailed(ev -> {
+                progress.progressProperty().unbind();
+                status.textProperty().unbind();
+                progress.setProgress(0);
+                Throwable ex = task.getException();
+                String msg = ex != null && ex.getMessage() != null ? ex.getMessage() : "Помилка імпорту CSV";
+                status.setText("Помилка: " + msg);
+                btnImportCsv.setDisable(false);
+                LOG.warning(msg);
+                showError(new Exception(msg, ex));
+            });
+
+            task.setOnCancelled(ev -> {
+                progress.progressProperty().unbind();
+                status.textProperty().unbind();
+                status.setText("Імпорт скасовано; частина записів могла бути збережена");
+                btnImportCsv.setDisable(false);
+            });
+
+            Thread thread = new Thread(task, "csv-import");
+            thread.setDaemon(true);
+            thread.start();
+        });
+
+        HBox buttons = new HBox(10, progress, status, btnImportCsv, btnAdd, btnUpdate, btnDelete, btnRefresh);
+        buttons.setAlignment(Pos.CENTER_LEFT);
         VBox bottom = new VBox(8, form, buttons);
         bottom.setPadding(new Insets(10));
 
@@ -417,27 +458,6 @@ public class MainApp extends Application {
         root.setBottom(bottom);
         root.setPadding(new Insets(10));
         return root;
-    }
-
-    private TimeSlot readTestTimeSlot() throws IOException {
-        Path file = Path.of("sample-data", "time_slots.csv");
-        List<String> lines = Files.readAllLines(file, StandardCharsets.UTF_8);
-        if (lines.size() < 2) {
-            throw new IllegalArgumentException("CSV-файл не містить рядків даних");
-        }
-        String line = lines.get(1);
-        String[] parts = line.split(";", -1);
-        if (parts.length != 6) {
-            throw new IllegalArgumentException("Некоректна кількість стовпців: " + parts.length);
-        }
-        long facilityId = Long.parseLong(parts[0].trim());
-        String slotDate = parts[1].trim();
-        String startTime = parts[2].trim();
-        String endTime = parts[3].trim();
-        double durationMinutes = Double.parseDouble(parts[4].trim());
-        boolean available = Boolean.parseBoolean(parts[5].trim());
-
-        return new TimeSlot(null, facilityId, slotDate, startTime, endTime, durationMinutes, available);
     }
 
     private void refreshAll() throws IOException, InterruptedException {
